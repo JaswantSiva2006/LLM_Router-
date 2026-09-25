@@ -36,7 +36,7 @@ def _direct_generate(model, tokenizer, question: str, max_new_tokens: int) -> to
             do_sample=False,
             temperature=None,
             top_p=None,
-            use_cache=False,
+            use_cache=True,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
         ).cpu()

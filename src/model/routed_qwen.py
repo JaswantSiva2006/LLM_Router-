@@ -8,12 +8,13 @@ it twice at a position would otherwise append that position twice.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Sequence
 from enum import IntEnum
 from typing import Any
 
 import torch
-from transformers.cache_utils import Cache, DynamicCache
+from transformers.cache_utils import Cache, DynamicCache, DynamicLayer
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Model
@@ -23,6 +24,26 @@ from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import capture_outputs
 
 QWEN25_15B_NUM_LAYERS = 28
+TRANSFORMERS_TARGET_VERSION = "5.2.0"
+_MASK_ACCEPTS_CACHE_POSITION = "cache_position" in inspect.signature(create_causal_mask).parameters
+
+
+def _create_mask(factory: Any, mask_kwargs: dict[str, Any]) -> Any:
+    """Call the v5.2 mask API, retaining local forward-compatibility for tests."""
+    if _MASK_ACCEPTS_CACHE_POSITION:
+        return factory(**mask_kwargs)
+    # Transformers after 5.2 derives positions differently. The production
+    # dependency is pinned to 5.2.0; this branch only keeps newer dev setups usable.
+    return factory(**{key: value for key, value in mask_kwargs.items() if key != "cache_position"})
+
+
+def _ensure_dynamic_cache_slots(cache: Cache, slot_count: int) -> None:
+    """Give repeated route occurrences independent logical DynamicCache slots."""
+    if not isinstance(cache, DynamicCache) or len(cache.layers) >= slot_count:
+        return
+    if getattr(cache, "layer_class_to_replicate", None) is not None:
+        return  # DynamicCache.update will grow it lazily.
+    cache.layers.extend(DynamicLayer() for _ in range(slot_count - len(cache.layers)))
 
 
 class LayerAction(IntEnum):
@@ -117,49 +138,64 @@ class RoutedQwen2Model(Qwen2Model):
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
+        cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
         route = validate_path(self.layer_indices, self.config.num_hidden_layers)
-        has_repeats = len(route) != len(set(route))
-        if has_repeats and (use_cache or past_key_values is not None):
-            raise ValueError(
-                "KV caching is unsafe for repeated physical layers; pass use_cache=False "
-                "or use generate_with_route(), which does so automatically"
-            )
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         if use_cache and past_key_values is None:
+            # Route occurrences, rather than physical layer IDs, own cache slots.
+            # This is identical for the default route and keeps repeats independent.
             past_key_values = DynamicCache(config=self.config)
-        if position_ids is None:
+        if past_key_values is not None:
+            _ensure_dynamic_cache_slots(past_key_values, len(route))
+        if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + past_seen_tokens
-            position_ids = position_ids.unsqueeze(0)
+            cache_position = torch.arange(
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
+            )
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
         if not isinstance(causal_mask_mapping := attention_mask, dict):
             mask_kwargs = {
                 "config": self.config,
                 "inputs_embeds": inputs_embeds,
                 "attention_mask": attention_mask,
+                "cache_position": cache_position,
                 "past_key_values": past_key_values,
                 "position_ids": position_ids,
             }
-            causal_mask_mapping = {"full_attention": create_causal_mask(**mask_kwargs)}
+            causal_mask_mapping = {"full_attention": _create_mask(create_causal_mask, mask_kwargs)}
             if self.has_sliding_layers:
-                causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
+                causal_mask_mapping["sliding_attention"] = _create_mask(
+                    create_sliding_window_causal_mask, mask_kwargs
+                )
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        for layer_id in route:
+        for cache_slot, layer_id in enumerate(route):
             decoder_layer = self.layers[layer_id]
-            hidden_states = decoder_layer(
-                hidden_states,
-                attention_mask=causal_mask_mapping[self.config.layer_types[layer_id]],
-                position_embeddings=position_embeddings,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                **kwargs,
-            )
+            original_cache_slot = decoder_layer.self_attn.layer_idx
+            try:
+                decoder_layer.self_attn.layer_idx = cache_slot
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    attention_mask=causal_mask_mapping[
+                        getattr(decoder_layer, "attention_type", self.config.layer_types[layer_id])
+                    ],
+                    position_embeddings=position_embeddings,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    cache_position=cache_position,
+                    **kwargs,
+                )
+            finally:
+                decoder_layer.self_attn.layer_idx = original_cache_slot
         hidden_states = self.norm(hidden_states)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -229,11 +265,10 @@ def generate_with_route(
                 do_sample=False,
                 temperature=None,
                 top_p=None,
-                use_cache=False,
+                use_cache=True,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
         return tokenizer.decode(output_ids[0, input_length:], skip_special_tokens=True).strip()
     finally:
         model.model.layer_indices = original
-

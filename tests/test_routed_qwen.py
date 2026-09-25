@@ -102,11 +102,56 @@ def test_label_validation_and_all_skip_path():
         labels_to_path([3] * 28)
 
 
-def test_repeat_with_kv_cache_is_explicitly_rejected():
+@pytest.mark.parametrize("route", [[0, 1, 2, 3], [0, 2, 3], [0, 1, 1, 2, 3]])
+def test_prefill_and_one_token_cached_decode_advance_positions(route):
     model = enable_qwen2_routing(tiny_model())
-    model.model.layer_indices = [0, 1, 1, 2, 3]
-    with pytest.raises(ValueError, match="KV caching is unsafe"):
-        model(torch.tensor([[1, 2]]), use_cache=True)
+    model.model.layer_indices = route
+    observed_positions = []
+    handles = [layer.register_forward_pre_hook(
+        lambda _module, _args, kwargs: observed_positions.append(kwargs["cache_position"].clone()),
+        with_kwargs=True,
+    ) for layer in model.model.layers]
+    prompt = torch.tensor([[1, 7, 3]])
+    next_token = torch.tensor([[9]])
+    try:
+        with torch.inference_mode():
+            prefill = model(prompt, attention_mask=torch.ones_like(prompt), use_cache=True)
+            cached = model(
+                next_token,
+                attention_mask=torch.ones(1, 4, dtype=torch.long),
+                past_key_values=prefill.past_key_values,
+                use_cache=True,
+            )
+            uncached = model(
+                torch.cat((prompt, next_token), dim=1),
+                attention_mask=torch.ones(1, 4, dtype=torch.long),
+                use_cache=False,
+            )
+    finally:
+        for handle in handles:
+            handle.remove()
+    assert prefill.past_key_values.get_seq_length() == 4
+    assert all(layer.get_seq_length() == 4 for layer in prefill.past_key_values.layers[: len(route)])
+    prefill_calls = len(route)
+    assert all(torch.equal(value, torch.arange(3)) for value in observed_positions[:prefill_calls])
+    cached_positions = observed_positions[prefill_calls : 2 * prefill_calls]
+    assert all(torch.equal(value, torch.tensor([3])) for value in cached_positions)
+    torch.testing.assert_close(cached.logits[:, -1], uncached.logits[:, -1], rtol=1e-4, atol=1e-5)
+
+
+def test_explicit_cache_position_propagates_through_causal_lm_wrapper():
+    model = enable_qwen2_routing(tiny_model())
+    observed = []
+    handle = model.model.layers[0].register_forward_pre_hook(
+        lambda _module, _args, kwargs: observed.append(kwargs["cache_position"].clone()),
+        with_kwargs=True,
+    )
+    try:
+        with torch.inference_mode():
+            model(torch.tensor([[1, 2]]), use_cache=True, cache_position=torch.tensor([5, 6]))
+    finally:
+        handle.remove()
+    assert torch.equal(observed[0], torch.tensor([5, 6]))
 
 
 class FakeTokenizer:
@@ -132,7 +177,7 @@ def test_generation_is_deterministic_and_restores_route_after_success():
         assert kwargs["do_sample"] is False
         assert kwargs["temperature"] is None
         assert kwargs["top_p"] is None
-        assert kwargs["use_cache"] is False
+        assert kwargs["use_cache"] is True
         self(input_ids, attention_mask=attention_mask, use_cache=False)
         return torch.cat((input_ids, torch.tensor([[11]])), dim=1)
 
@@ -170,4 +215,3 @@ def test_route_restored_after_generation_exception_then_default_is_full():
             handle.remove()
     assert observed == [0, 1, 2, 3]
     assert model.model.layer_indices == [0, 1, 2, 3]
-
