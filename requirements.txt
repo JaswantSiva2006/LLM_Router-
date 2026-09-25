@@ -1,0 +1,5 @@
+datasets>=2.18
+huggingface-hub>=0.28
+pytest>=8
+torch>=2.2
+transformers>=5.0,<6
