@@ -183,3 +183,115 @@ assert summary["replay_failures"] == 0
 print(json.dumps(summary, indent=2, sort_keys=True))
 PY
 ```
+
+## Router training
+
+Run these steps in order after the repository and, for steps 7 onward, the
+final dataset have been attached to the Kaggle notebook. None of these commands
+is launched automatically by the repository.
+
+### 1. Check the GPUs
+
+```bash
+nvidia-smi
+```
+
+Confirm that Kaggle exposes two NVIDIA T4 16 GB GPUs.
+
+### 2. Install dependencies
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install -e . --no-deps
+```
+
+### 3. Verify the Transformers version
+
+```bash
+python -c 'import transformers; print(transformers.__version__)'
+```
+
+It must match the version pinned in `requirements.txt` and `pyproject.toml`.
+
+### 4. Run the test suite
+
+```bash
+python -m pytest -q
+```
+
+### 5. Validate the routed router model
+
+```bash
+python -m src.router_training.validate_model \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --precision fp16
+```
+
+### 6. Smoke train on 8 examples
+
+```bash
+python -m src.router_training.smoke_train \
+  --data tests/fixtures/router_training_small.jsonl \
+  --allow-small-dataset \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --samples 8 \
+  --precision fp16
+```
+
+Do not continue unless the smoke test reports decreasing loss, changed router
+weights, and unchanged Qwen weights.
+
+### 7. Verify the final 4k dataset
+
+```bash
+python -m src.router_training.verify_readiness \
+  --data artifacts/gsm8k_mcts_4k.jsonl \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --precision fp16
+```
+
+Continue only when this prints `ROUTER TRAINING READY: YES`.
+
+### 8. Run two-GPU diagnostic 3600/400 training
+
+```bash
+torchrun \
+  --standalone \
+  --nproc_per_node=2 \
+  -m src.router_training.train \
+  --data artifacts/gsm8k_mcts_4k.jsonl \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --epochs 25 \
+  --microbatch 1 \
+  --gradient-accumulation 8 \
+  --precision fp16 \
+  --val-fraction 0.10 \
+  --output /kaggle/working/runs/router_train_diagnostic
+```
+
+### 9. Inspect metrics
+
+```bash
+tail -n 5 /kaggle/working/runs/router_train_diagnostic/metrics.jsonl
+ls -lh /kaggle/working/runs/router_train_diagnostic/
+```
+
+Inspect validation loss, macro F1, class proportions, executed-layer means,
+exact-path accuracy, and per-layer accuracy before considering final training.
+
+### 10. Optionally run final all-4000 training
+
+```bash
+torchrun \
+  --standalone \
+  --nproc_per_node=2 \
+  -m src.router_training.train \
+  --data artifacts/gsm8k_mcts_4k.jsonl \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --epochs 25 \
+  --microbatch 1 \
+  --gradient-accumulation 8 \
+  --precision fp16 \
+  --val-fraction 0 \
+  --output /kaggle/working/runs/router_train_final
+```

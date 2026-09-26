@@ -20,6 +20,11 @@ ONLY return the final result in LaTeX with no words.
 The result MUST be wrapped inside \\boxed{{...}}."""
 
 
+def build_generation_prompt(question: str) -> str:
+    """Build the canonical prompt used for GSM8K route search and training."""
+    return PROMPT_TEMPLATE.format(question=question)
+
+
 @dataclass(frozen=True)
 class GSM8KRecord:
     dataset_id: str
@@ -53,7 +58,7 @@ def adapt_record(item: dict[str, Any], index: int, split: str = DEFAULT_SPLIT) -
         question=question,
         gold_reasoning=reasoning,
         gold_answer=gold,
-        generation_prompt=PROMPT_TEMPLATE.format(question=question),
+        generation_prompt=build_generation_prompt(question),
     )
 
 

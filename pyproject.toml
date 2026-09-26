@@ -3,7 +3,7 @@ name = "drllm-gsm8k-data"
 version = "0.1.0"
 description = "GSM8K data and deterministic answer verification for a Dr.LLM adaptation"
 requires-python = ">=3.10"
-dependencies = ["datasets>=2.18", "torch>=2.2", "transformers==5.2.0"]
+dependencies = ["datasets>=2.18", "safetensors>=0.4", "torch>=2.2", "transformers==5.2.0"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

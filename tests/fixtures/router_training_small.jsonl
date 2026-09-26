@@ -1,0 +1,8 @@
+{"id":"gsm8k-train-fixture-000","question":"What is 1 plus 1?","answer":"2","optimal_layer_config":[0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2]}
+{"id":"gsm8k-train-fixture-001","question":"What is 2 plus 3?","answer":"5","optimal_layer_config":[0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2]}
+{"id":"gsm8k-train-fixture-002","question":"What is 4 times 2?","answer":"8","optimal_layer_config":[0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,1,2]}
+{"id":"gsm8k-train-fixture-003","question":"What is 9 minus 4?","answer":"5","optimal_layer_config":[1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,1,2,1]}
+{"id":"gsm8k-train-fixture-004","question":"What is half of 12?","answer":"6","optimal_layer_config":[1,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,1,2,1,1]}
+{"id":"gsm8k-train-fixture-005","question":"How many sides has a triangle?","answer":"3","optimal_layer_config":[1,1,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,1,2,1,1,1]}
+{"id":"gsm8k-train-fixture-006","question":"What is 20 divided by 5?","answer":"4","optimal_layer_config":[1,1,1,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,1,2,1,1,1,1]}
+{"id":"gsm8k-train-fixture-007","question":"What is 7 plus 8?","answer":"15","optimal_layer_config":[1,1,1,1,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,2,1,2,1,1,1,1,1]}
