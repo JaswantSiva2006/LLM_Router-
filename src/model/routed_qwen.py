@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Sequence
 from enum import IntEnum
+from functools import wraps
 from typing import Any
 
 import torch
@@ -20,8 +21,29 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Model
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
-from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import capture_outputs
+
+try:
+    # Added during the Transformers 5.x decorator split. Some Kaggle base
+    # images contain the preceding transitional build, which already has
+    # capture_outputs but not this companion decorator.
+    from transformers.utils.generic import merge_with_config_defaults
+except ImportError:
+    def merge_with_config_defaults(function):
+        """Compatibility form of the upstream decorator for cached decoding."""
+        @wraps(function)
+        def wrapper(self, *args, **kwargs):
+            if kwargs.get("use_cache") is None:
+                kwargs["use_cache"] = getattr(self.config, "use_cache", None)
+            if (
+                kwargs.get("use_cache")
+                and getattr(self, "gradient_checkpointing", False)
+                and self.training
+            ):
+                kwargs["use_cache"] = False
+            return function(self, *args, **kwargs)
+
+        return wrapper
 
 QWEN25_15B_NUM_LAYERS = 28
 TRANSFORMERS_TARGET_VERSION = "5.2.0"

@@ -9,9 +9,21 @@ model parallelism.
 
 ```bash
 cd /kaggle/working/Kaggle_DRLLM
+python -m pip install --upgrade --force-reinstall "transformers==5.2.0"
 python -m pip install -r requirements.txt
 python -m pip install -e . --no-deps
 ```
+
+Kaggle images may already contain a different Transformers build. The forced
+reinstall is intentional. Verify the active interpreter before launching the
+workers:
+
+```bash
+python -c 'import transformers; from transformers.utils.generic import merge_with_config_defaults; print(transformers.__version__)'
+```
+
+This must print `5.2.0`. In a notebook, use `%pip` for the install commands if
+the shell and notebook interpreters differ.
 
 If the repository is attached under a different directory, change the first
 command accordingly. Confirm that Kaggle enabled two GPUs:
