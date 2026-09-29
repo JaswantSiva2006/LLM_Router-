@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     base_versions = tuple(parameter._version for parameter in model.base_model.parameters())
     router_before = {key: value.detach().clone() for key, value in model.routers.state_dict().items()}
     initial_loss = evaluate_loss(model, loader, alpha, 2.0, device)
-    scaler = torch.amp.GradScaler("cuda")
+    scaler = torch.amp.GradScaler("cuda", init_scale=1.0)
     model.train()
     cycle = itertools.cycle(loader)
     for _ in range(args.max_steps):

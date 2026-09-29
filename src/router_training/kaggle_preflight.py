@@ -91,7 +91,9 @@ def main(argv: list[str] | None = None) -> int:
     alpha = torch.tensor(weights, dtype=torch.float32, device=device)
     watched = next(model.routers.parameters())
     before = watched.detach().clone()
-    scaler = torch.amp.GradScaler("cuda")
+    # Router parameters are FP32, so the default 65536 scale is unnecessary and
+    # can make the one-step smoke check overflow before GradScaler adapts.
+    scaler = torch.amp.GradScaler("cuda", init_scale=1.0)
     model.train()
     optimizer.zero_grad(set_to_none=True)
     with torch.autocast(device_type="cuda", dtype=torch.float16):

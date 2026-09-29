@@ -474,7 +474,9 @@ def main(argv: list[str] | None = None) -> int:
         scheduler = get_cosine_schedule_with_warmup(
             optimizer, config.warmup_steps, steps_per_epoch * config.epochs
         )
-        scaler = torch.amp.GradScaler("cuda", enabled=args.precision == "fp16")
+        scaler = torch.amp.GradScaler(
+            "cuda", enabled=args.precision == "fp16", init_scale=1.0
+        )
         if world_size > 1:
             model = DistributedDataParallel(
                 model, device_ids=[local_rank], output_device=local_rank,

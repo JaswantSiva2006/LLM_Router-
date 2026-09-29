@@ -98,7 +98,7 @@ def test_fp16_backbone_fp32_router_gradients_and_grad_scaler_step():
     model.base_model.to(dtype=torch.float16)
     model.routers.to(dtype=torch.float32)
     optimizer = build_optimizer(model)
-    scaler = torch.amp.GradScaler("cuda")
+    scaler = torch.amp.GradScaler("cuda", init_scale=1.0)
     inputs = torch.tensor([[1, 2]], device="cuda")
     targets = torch.ones((1, 28), dtype=torch.long, device="cuda")
 
