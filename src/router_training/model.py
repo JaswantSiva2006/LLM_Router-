@@ -76,8 +76,6 @@ def windowed_router_logits(
 @dataclass
 class RouterTrainingOutput:
     router_logits: Tensor
-    logits: Tensor
-    last_hidden_state: Tensor
 
 
 class TeacherForcedRouterQwen(nn.Module):
@@ -113,7 +111,7 @@ class TeacherForcedRouterQwen(nn.Module):
         labels: Tensor,
         position_ids: Tensor | None,
         **kwargs: Any,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> Tensor:
         qwen = self.base_model.model
         if inputs_embeds is None:
             inputs_embeds = qwen.embed_tokens(input_ids)
@@ -161,7 +159,7 @@ class TeacherForcedRouterQwen(nn.Module):
                     cache_position=cache_position,
                     **kwargs,
                 )
-        return qwen.norm(hidden_states), torch.stack(all_router_logits, dim=1)
+        return torch.stack(all_router_logits, dim=1)
 
     def forward(
         self,
@@ -188,7 +186,7 @@ class TeacherForcedRouterQwen(nn.Module):
         if router_labels.dtype != torch.long:
             raise TypeError("router_labels must have dtype torch.long")
 
-        hidden_batches, router_batches = [], []
+        router_batches = []
         for sample_index in range(batch_size):
             sample_ids = input_ids[sample_index : sample_index + 1] if input_ids is not None else None
             sample_embeds = (
@@ -201,7 +199,7 @@ class TeacherForcedRouterQwen(nn.Module):
                 if position_ids is not None and position_ids.shape[0] == batch_size
                 else position_ids
             )
-            hidden, router_logits = self._forward_one(
+            router_logits = self._forward_one(
                 sample_ids,
                 sample_embeds,
                 attention_mask[sample_index : sample_index + 1],
@@ -209,12 +207,8 @@ class TeacherForcedRouterQwen(nn.Module):
                 sample_positions,
                 **kwargs,
             )
-            hidden_batches.append(hidden)
             router_batches.append(router_logits)
 
-        last_hidden_state = torch.cat(hidden_batches, dim=0)
         return RouterTrainingOutput(
             router_logits=torch.cat(router_batches, dim=0),
-            logits=self.base_model.lm_head(last_hidden_state),
-            last_hidden_state=last_hidden_state,
         )

@@ -199,28 +199,72 @@ def save_training_state(
     global_step: int,
     metadata: dict[str, Any],
     rank: int = 0,
+    archive: bool = False,
 ) -> None:
     if rank != 0:
         return
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
     routers = router_state_dict(model)
-    save_file(routers, destination / "routers_only.safetensors")
-    torch.save(
-        {
-            "routers": routers,
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "scaler": scaler.state_dict() if scaler is not None else None,
-            "epoch": epoch,
-            "global_step": global_step,
-            "metadata": metadata,
-            "python_rng_state": random.getstate(),
-            "torch_rng_state": torch.get_rng_state(),
-            "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-        },
-        destination / "training_checkpoint.pt",
-    )
+    _atomic_save_safetensors(routers, destination / "routers_only.safetensors")
+    state = {
+        "routers": routers,
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "scaler": scaler.state_dict() if scaler is not None else None,
+        "epoch": epoch,
+        "global_step": global_step,
+        "metadata": metadata,
+        "python_rng_state": random.getstate(),
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+    _atomic_torch_save(state, destination / "training_checkpoint.pt")
+    if archive:
+        checkpoint_dir = destination / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_torch_save(state, checkpoint_dir / f"epoch_{epoch:04d}.pt")
+        _atomic_torch_save(state, checkpoint_dir / "latest.pt")
+
+
+def _atomic_save_safetensors(tensors: dict[str, Tensor], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    save_file(tensors, temporary)
+    os.replace(temporary, path)
+
+
+def _atomic_torch_save(value: Any, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    torch.save(value, temporary)
+    os.replace(temporary, path)
+
+
+def _atomic_write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(value, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def _best_logged_metric(path: Path) -> float:
+    best = math.inf
+    if not path.is_file():
+        return best
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            metrics = value.get("validation", value.get("train", {}))
+            if "router_loss" in metrics:
+                best = min(best, float(metrics["router_loss"]))
+    return best
 
 
 def load_training_state(
@@ -281,7 +325,10 @@ def _run_epoch(
     if training:
         optimizer.zero_grad(set_to_none=True)
     for batch_index, batch in enumerate(loader):
-        batch = {key: value.to(device) for key, value in batch.items()}
+        batch = {
+            key: value.to(device, non_blocking=device.type == "cuda")
+            for key, value in batch.items()
+        }
         boundary = (batch_index + 1) % accumulation == 0 or batch_index + 1 == len(loader)
         autocast = (
             torch.autocast(device_type="cuda", dtype=torch.float16)
@@ -342,7 +389,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--precision", choices=("fp16", "bf16", "fp32"), default="fp16")
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--output", type=Path, default=Path("runs/router_train"))
-    parser.add_argument("--resume", type=Path)
+    parser.add_argument("--resume", help="checkpoint path, or 'latest' under OUTPUT/checkpoints")
+    parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--allow-small-dataset", action="store_true")
     args = parser.parse_args(argv)
 
@@ -363,6 +411,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         random.seed(config.seed)
         torch.manual_seed(config.seed + rank)
+        if not args.resume and (args.output / "checkpoints" / "latest.pt").exists():
+            raise FileExistsError(
+                f"existing checkpoint found under {args.output}; pass --resume latest "
+                "or choose a new --output directory"
+            )
 
         records = load_router_dataset(args.data, allow_small_dataset=args.allow_small_dataset)
         train_indices, validation_indices = deterministic_split_indices(
@@ -396,10 +449,14 @@ def main(argv: list[str] | None = None) -> int:
         train_loader = DataLoader(
             train_dataset, batch_size=config.microbatch, sampler=train_sampler,
             shuffle=train_sampler is None, collate_fn=collator,
+            num_workers=args.num_workers, pin_memory=device.type == "cuda",
+            persistent_workers=args.num_workers > 0,
         )
         validation_loader = DataLoader(
             validation_dataset, batch_size=config.microbatch, sampler=validation_sampler,
             shuffle=False, collate_fn=collator,
+            num_workers=args.num_workers, pin_memory=device.type == "cuda",
+            persistent_workers=args.num_workers > 0,
         ) if validation_records else None
         steps_per_epoch = math.ceil(len(train_loader) / config.gradient_accumulation)
         scheduler = get_cosine_schedule_with_warmup(
@@ -426,9 +483,16 @@ def main(argv: list[str] | None = None) -> int:
             ),
         }
         start_epoch = global_step = 0
+        resume_path = None
         if args.resume:
+            resume_path = (
+                args.output / "checkpoints" / "latest.pt"
+                if args.resume == "latest" else Path(args.resume)
+            )
+            if not resume_path.is_file():
+                raise FileNotFoundError(f"resume checkpoint not found: {resume_path}")
             start_epoch, global_step, saved_metadata = load_training_state(
-                args.resume, model, optimizer, scheduler, scaler,
+                resume_path, model, optimizer, scheduler, scaler,
                 expected_dataset_sha256=sha256,
             )
             if saved_metadata["class_weights"] != class_weights:
@@ -436,7 +500,24 @@ def main(argv: list[str] | None = None) -> int:
 
         if rank == 0:
             args.output.mkdir(parents=True, exist_ok=True)
+            (args.output / "checkpoints").mkdir(parents=True, exist_ok=True)
+            manifest = {
+                **metadata,
+                "data": str(args.data.resolve()),
+                "output": str(args.output.resolve()),
+                "train_samples": len(train_records),
+                "validation_samples": len(validation_records),
+                "val_fraction": args.val_fraction,
+                "num_workers": args.num_workers,
+            }
+            _atomic_write_json(args.output / "run_manifest.json", manifest)
             print(json.dumps(metadata, indent=2))
+        log_path = args.output / "training_log.jsonl"
+        best_metric = _best_logged_metric(log_path) if rank == 0 else math.inf
+        if start_epoch >= config.epochs:
+            if rank == 0:
+                print(f"training already complete at epoch {start_epoch}")
+            return 0
         for epoch in range(start_epoch, config.epochs):
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
@@ -454,12 +535,35 @@ def main(argv: list[str] | None = None) -> int:
                 result["validation"] = validation_metrics
             if rank == 0:
                 print(json.dumps(result))
-                with (args.output / "metrics.jsonl").open("a", encoding="utf-8") as stream:
+                with log_path.open("a", encoding="utf-8") as stream:
                     stream.write(json.dumps(result) + "\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                score = float(result.get("validation", result["train"])["router_loss"])
+                if score < best_metric:
+                    best_metric = score
+                    _atomic_save_safetensors(
+                        router_state_dict(model), args.output / "best_routers.safetensors"
+                    )
             save_training_state(
                 args.output, model, optimizer, scheduler, scaler,
                 epoch=epoch + 1, global_step=global_step, metadata=metadata, rank=rank,
+                archive=True,
             )
+        if rank == 0:
+            final_metrics = {
+                **result,
+                "best_router_loss": best_metric,
+                "artifacts": {
+                    "routers": str((args.output / "routers_only.safetensors").resolve()),
+                    "best_routers": str((args.output / "best_routers.safetensors").resolve()),
+                    "latest_checkpoint": str((args.output / "checkpoints" / "latest.pt").resolve()),
+                    "training_log": str(log_path.resolve()),
+                    "run_manifest": str((args.output / "run_manifest.json").resolve()),
+                },
+            }
+            _atomic_write_json(args.output / "metrics_final.json", final_metrics)
+            print(json.dumps(final_metrics["artifacts"], indent=2))
         return 0
     finally:
         if dist.is_available() and dist.is_initialized():
