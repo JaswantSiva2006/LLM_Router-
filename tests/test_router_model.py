@@ -54,10 +54,11 @@ def test_exactly_28_routers_and_only_they_are_trainable():
     assert trainable and all(name.startswith("routers.") for name in trainable)
 
 
-def test_routers_inherit_external_base_dtype():
+def test_routers_remain_fp32_when_external_base_has_another_dtype():
     base = tiny_router_model().base_model.to(dtype=torch.float64)
     model = TeacherForcedRouterQwen(base)
-    assert {parameter.dtype for parameter in model.routers.parameters()} == {torch.float64}
+    assert {parameter.dtype for parameter in model.base_model.parameters()} == {torch.float64}
+    assert {parameter.dtype for parameter in model.routers.parameters()} == {torch.float32}
 
 
 class RecordingRouter(nn.Module):
@@ -147,10 +148,13 @@ def test_only_router_gradients_exist_after_backward():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_fp16_cuda_forward():
-    model = tiny_router_model().to(device="cuda", dtype=torch.float16)
-    output = model(
-        torch.tensor([[1, 2, 3]], device="cuda"),
-        router_labels=torch.ones((1, 28), dtype=torch.long, device="cuda"),
-    )
+    model = tiny_router_model()
+    model.base_model.to(device="cuda", dtype=torch.float16)
+    model.routers.to(device="cuda", dtype=torch.float32)
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        output = model(
+            torch.tensor([[1, 2, 3]], device="cuda"),
+            router_labels=torch.ones((1, 28), dtype=torch.long, device="cuda"),
+        )
     assert output.router_logits.dtype == torch.float16
     assert output.router_logits.is_cuda

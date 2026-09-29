@@ -13,7 +13,12 @@ from src.router_training.dataset import load_router_dataset
 from src.router_training.loss import focal_loss
 from src.router_training.model import TeacherForcedRouterQwen
 from src.router_training.stats import count_labels, effective_number_weights
-from src.router_training.train import TokenizedRouterDataset, build_optimizer, make_collator
+from src.router_training.train import (
+    TokenizedRouterDataset,
+    assert_trainable_gradients_fp32,
+    build_optimizer,
+    make_collator,
+)
 
 
 @torch.no_grad()
@@ -53,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         tokenizer.pad_token = tokenizer.eos_token
     base = Qwen2ForCausalLM.from_pretrained(args.model, dtype=torch.float16).to(device)
     model = TeacherForcedRouterQwen(base).to(device)
+    model.routers.to(device=device, dtype=torch.float32)
     optimizer = build_optimizer(model)
     weights = effective_number_weights(count_labels(records))
     alpha = torch.tensor(weights, dtype=torch.float16, device=device)
@@ -74,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             output = model(**batch, use_cache=False)
             loss = focal_loss(output.router_logits, batch["router_labels"], alpha, 2.0)
         scaler.scale(loss).backward()
+        assert_trainable_gradients_fp32(model)
         scaler.step(optimizer)
         scaler.update()
     final_loss = evaluate_loss(model, loader, alpha, 2.0, device)

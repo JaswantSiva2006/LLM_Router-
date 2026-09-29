@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from src.router_training.train import (
     RouterMetrics,
     _run_epoch,
+    assert_trainable_gradients_fp32,
     build_optimizer,
     deterministic_split_indices,
     global_effective_batch_size,
@@ -26,7 +27,7 @@ class TinyTrainModel(nn.Module):
         self.routers = nn.ModuleList([nn.Linear(2, 3) for _ in range(28)])
 
     def forward(self, input_ids, router_labels, use_cache=False):
-        features = input_ids.float()
+        features = self.base_model(input_ids.float())
         logits = torch.stack([router(features) for router in self.routers], dim=1)
         return type("Output", (), {"router_logits": logits})()
 
@@ -89,6 +90,34 @@ def test_optimizer_only_contains_routers_and_accumulation_controls_scheduler():
     assert updates == 3
     assert scheduler.steps == updates
     torch.testing.assert_close(alpha, original_alpha)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_fp16_backbone_fp32_router_gradients_and_grad_scaler_step():
+    model = TinyTrainModel().to("cuda")
+    model.base_model.to(dtype=torch.float16)
+    model.routers.to(dtype=torch.float32)
+    optimizer = build_optimizer(model)
+    scaler = torch.amp.GradScaler("cuda")
+    inputs = torch.tensor([[1, 2]], device="cuda")
+    targets = torch.ones((1, 28), dtype=torch.long, device="cuda")
+
+    assert {parameter.dtype for parameter in model.base_model.parameters()} == {torch.float16}
+    assert {parameter.dtype for parameter in model.routers.parameters()} == {torch.float32}
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        output = model(inputs, targets)
+        loss = torch.nn.functional.cross_entropy(
+            output.router_logits.reshape(-1, 3), targets.reshape(-1)
+        )
+    scaler.scale(loss).backward()
+    assert_trainable_gradients_fp32(model)
+    assert {
+        parameter.grad.dtype
+        for parameter in model.routers.parameters()
+        if parameter.grad is not None
+    } == {torch.float32}
+    scaler.step(optimizer)
+    scaler.update()
 
 
 def test_checkpoint_resume_and_rank_zero_only(tmp_path):

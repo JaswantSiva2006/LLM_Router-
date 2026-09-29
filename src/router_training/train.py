@@ -69,19 +69,29 @@ def make_distributed_sampler(
 
 
 def build_optimizer(model: nn.Module, learning_rate: float = 1e-3, weight_decay: float = 0.01) -> AdamW:
-    named = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
-    if not named:
+    trainable = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
+    if not trainable:
         raise ValueError("model has no trainable router parameters")
-    invalid = [name for name, _ in named if not (name.startswith("routers.") or ".routers." in name)]
-    if invalid:
-        raise RuntimeError(f"non-router parameters require gradients: {invalid[:3]}")
-    frozen_violations = [
-        name for name, parameter in model.named_parameters()
-        if not (name.startswith("routers.") or ".routers." in name) and parameter.requires_grad
-    ]
-    if frozen_violations:
-        raise RuntimeError("all Qwen parameters must be frozen")
-    return AdamW([parameter for _, parameter in named], lr=learning_rate, weight_decay=weight_decay)
+    assert all("router" in name.lower() for name, _ in trainable), (
+        "all trainable parameters must belong to routers"
+    )
+    assert all(parameter.dtype == torch.float32 for _, parameter in trainable), (
+        "all trainable router parameters must be float32"
+    )
+    return AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
+
+
+def assert_trainable_gradients_fp32(model: nn.Module) -> None:
+    """Fail immediately if mixed precision produced a non-FP32 router gradient."""
+    trainable = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
+    gradients = [(name, parameter.grad) for name, parameter in trainable if parameter.grad is not None]
+    assert all(gradient.dtype == torch.float32 for _, gradient in gradients), (
+        "all existing trainable gradients must be float32"
+    )
 
 
 class TokenizedRouterDataset(Dataset[dict[str, Any]]):
@@ -351,6 +361,7 @@ def _run_epoch(
                     scaler.scale(scaled_loss).backward()
                 else:
                     scaled_loss.backward()
+                assert_trainable_gradients_fp32(model)
         metrics.update(loss.detach(), output.router_logits.detach(), batch["router_labels"])
         if training:
             if boundary:
@@ -435,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
             args.model, revision=args.model_revision, dtype=dtype
         ).to(device)
         model: nn.Module = TeacherForcedRouterQwen(base).to(device)
+        model.routers.to(device=device, dtype=torch.float32)
         optimizer = build_optimizer(model, config.learning_rate, config.weight_decay)
 
         train_dataset = TokenizedRouterDataset(train_records)
@@ -468,6 +480,13 @@ def main(argv: list[str] | None = None) -> int:
                 model, device_ids=[local_rank], output_device=local_rank,
                 broadcast_buffers=False, find_unused_parameters=False,
             )
+            trainable = [
+                (name, parameter)
+                for name, parameter in model.named_parameters()
+                if parameter.requires_grad
+            ]
+            assert all("router" in name.lower() for name, _ in trainable)
+            assert all(parameter.dtype == torch.float32 for _, parameter in trainable)
 
         sha256 = dataset_sha256(args.data)
         metadata = {

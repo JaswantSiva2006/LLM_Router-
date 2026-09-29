@@ -97,7 +97,9 @@ class TeacherForcedRouterQwen(nn.Module):
             LayerRouter(base_model.config.hidden_size) for _ in range(NUM_LAYERS)
         )
         base_parameter = next(base_model.parameters())
-        self.routers.to(device=base_parameter.device, dtype=base_parameter.dtype)
+        # GradScaler cannot unscale FP16 gradients.  Keep the frozen backbone in
+        # its memory-efficient dtype, but always optimize FP32 router weights.
+        self.routers.to(device=base_parameter.device, dtype=torch.float32)
 
     @property
     def router_parameter_count(self) -> int:
