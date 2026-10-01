@@ -1,3 +1,16 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Generated router-training artifacts
+best_routers.safetensors
+routers_only.safetensors
+training_checkpoint.pt
+training_log.jsonl
+metrics_final.json
+run_manifest.json
+router_training/
+router_training_v2/
+
+# Generated evaluation runs
+runs/

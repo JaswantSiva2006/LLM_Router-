@@ -6,12 +6,14 @@ cd "$REPO_ROOT"
 
 DATASET_PATH="${DATASET_PATH:-$REPO_ROOT/router_train_data.jsonl}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-1.5B-Instruct}"
+MODEL_REVISION="${MODEL_REVISION:-989aa7980e4cf806f80c7fef2b1adb7bc71aa306}"
 EXPECTED_SAMPLES="${EXPECTED_SAMPLES:-2916}"
 
 python -m src.router_training.kaggle_preflight \
   --data "$DATASET_PATH" \
   --expected-samples "$EXPECTED_SAMPLES" \
-  --model "$MODEL_NAME"
+  --model "$MODEL_NAME" \
+  --model-revision "$MODEL_REVISION"
 
 torchrun --standalone --nproc_per_node=2 -m src.router_training.ddp_smoke
 

@@ -7,6 +7,7 @@ from src.data.gsm8k import build_generation_prompt
 from src.router_training.dataset import load_router_dataset
 from src.router_training.loss import focal_loss
 from src.router_training.stats import count_labels, effective_number_weights
+from src.router_training.train import make_collator
 
 
 FIXTURE = "tests/fixtures/router_training_small.jsonl"
@@ -95,3 +96,27 @@ def test_answer_never_enters_router_input(tmp_path):
     loaded = load_router_dataset(path, allow_small_dataset=True)[0]
     assert loaded.router_input == build_generation_prompt(loaded.question)
     assert loaded.answer not in loaded.router_input
+
+
+def test_collator_uses_chat_template_and_excludes_provenance_answer():
+    class RecordingTokenizer:
+        def __init__(self):
+            self.encoded = []
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+            assert tokenize is False
+            assert add_generation_prompt is True
+            assert messages == [{"role": "user", "content": "PROMPT"}]
+            return "<user>PROMPT</user><assistant>"
+
+        def __call__(self, texts, padding=False, return_tensors=None):
+            assert padding is True
+            assert return_tensors == "pt"
+            self.encoded.extend(texts)
+            return {"input_ids": torch.ones((len(texts), 3), dtype=torch.long)}
+
+    tokenizer = RecordingTokenizer()
+    batch = make_collator(tokenizer)([{"text": "PROMPT", "labels": [1] * 28}])
+    assert tokenizer.encoded == ["<user>PROMPT</user><assistant>"]
+    assert "SECRET_PROVENANCE_ANSWER" not in tokenizer.encoded[0]
+    assert batch["router_labels"].shape == (1, 28)

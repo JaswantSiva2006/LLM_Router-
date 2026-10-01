@@ -16,6 +16,7 @@ from src.router_training.train import (
     load_training_state,
     make_distributed_sampler,
     save_training_state,
+    validate_resume_metadata,
 )
 
 
@@ -148,6 +149,23 @@ def test_checkpoint_resume_and_rank_zero_only(tmp_path):
     assert (epoch, step, loaded) == (2, 7, metadata)
     for key, value in model.routers.state_dict().items():
         torch.testing.assert_close(value, original[key])
+
+
+def test_resume_metadata_rejects_old_prompt_or_model_revision():
+    current = {
+        "dataset_sha256": "abc", "model": "qwen", "model_revision": "sha-new",
+        "router_prompt_format": "chat_template_user_with_generation_prompt",
+        "class_weights": [1.0, 1.0, 1.0], "precision": "fp16",
+        "world_size": 2, "effective_global_batch": 16,
+    }
+    validate_resume_metadata(dict(current), current)
+    old = dict(current)
+    old.pop("router_prompt_format")
+    with pytest.raises(ValueError, match="router_prompt_format"):
+        validate_resume_metadata(old, current)
+    wrong_revision = dict(current, model_revision="sha-old")
+    with pytest.raises(ValueError, match="model_revision"):
+        validate_resume_metadata(wrong_revision, current)
 
 
 def test_metrics_and_fake_distributed_aggregation(monkeypatch):

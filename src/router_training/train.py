@@ -28,6 +28,9 @@ from src.router_training.loss import focal_loss
 from src.router_training.model import NUM_LAYERS, TeacherForcedRouterQwen
 from src.router_training.stats import BETA, count_labels, effective_number_weights
 
+DEFAULT_MODEL_REVISION = "989aa7980e4cf806f80c7fef2b1adb7bc71aa306"
+ROUTER_PROMPT_FORMAT = "chat_template_user_with_generation_prompt"
+
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -108,9 +111,18 @@ class TokenizedRouterDataset(Dataset[dict[str, Any]]):
 
 def make_collator(tokenizer: Any):
     def collate(items: list[dict[str, Any]]) -> dict[str, Tensor]:
-        # Only canonical router prompts enter tokenization; provenance answers are absent.
+        # Match MCTS generation and deployed instruction-model inference exactly.
+        # The provenance answer is deliberately absent from this conversation.
+        prompts = [
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": item["text"]}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for item in items
+        ]
         encoded = tokenizer(
-            [item["text"] for item in items], padding=True, return_tensors="pt"
+            prompts, padding=True, return_tensors="pt"
         )
         encoded["router_labels"] = torch.tensor(
             [item["labels"] for item in items], dtype=torch.long
@@ -303,6 +315,20 @@ def load_training_state(
     return int(state["epoch"]), int(state["global_step"]), metadata
 
 
+def validate_resume_metadata(saved: dict[str, Any], current: dict[str, Any]) -> None:
+    """Prevent resuming weights produced by an incompatible training pipeline."""
+    required = (
+        "dataset_sha256", "model", "model_revision", "router_prompt_format",
+        "class_weights", "precision", "world_size", "effective_global_batch",
+    )
+    for key in required:
+        if saved.get(key) != current.get(key):
+            raise ValueError(
+                f"checkpoint {key} does not match this run: "
+                f"saved={saved.get(key)!r}, current={current.get(key)!r}"
+            )
+
+
 def _optimizer_update(
     optimizer: torch.optim.Optimizer, scheduler: Any, scaler: Any, model: nn.Module
 ) -> None:
@@ -393,7 +419,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
-    parser.add_argument("--model-revision", default="main")
+    parser.add_argument("--model-revision", default=DEFAULT_MODEL_REVISION)
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--microbatch", type=int, default=1)
     parser.add_argument("--gradient-accumulation", type=int, default=None)
@@ -499,6 +525,7 @@ def main(argv: list[str] | None = None) -> int:
             "transformers_version": transformers_version, "cuda_version": torch.version.cuda,
             "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
             "precision": args.precision, "seed": config.seed, "world_size": world_size,
+            "router_prompt_format": ROUTER_PROMPT_FORMAT,
             "effective_global_batch": global_effective_batch_size(
                 config.microbatch, config.gradient_accumulation, world_size
             ),
@@ -516,8 +543,7 @@ def main(argv: list[str] | None = None) -> int:
                 resume_path, model, optimizer, scheduler, scaler,
                 expected_dataset_sha256=sha256,
             )
-            if saved_metadata["class_weights"] != class_weights:
-                raise ValueError("checkpoint class weights do not match the training split")
+            validate_resume_metadata(saved_metadata, metadata)
 
         if rank == 0:
             args.output.mkdir(parents=True, exist_ok=True)

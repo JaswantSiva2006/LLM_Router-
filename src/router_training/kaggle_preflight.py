@@ -15,6 +15,7 @@ from src.router_training.loss import focal_loss
 from src.router_training.model import NUM_LAYERS, TeacherForcedRouterQwen
 from src.router_training.stats import count_labels, effective_number_weights
 from src.router_training.train import (
+    DEFAULT_MODEL_REVISION,
     TokenizedRouterDataset,
     assert_trainable_gradients_fp32,
     build_optimizer,
@@ -32,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--expected-samples", type=int, default=2916)
     parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
+    parser.add_argument("--model-revision", default=DEFAULT_MODEL_REVISION)
     args = parser.parse_args(argv)
 
     torch_release = torch.__version__.split("+", 1)[0]
@@ -61,15 +63,18 @@ def main(argv: list[str] | None = None) -> int:
     counts = count_labels(records)
     weights = effective_number_weights(counts)
     print(f"dataset={args.data.resolve()} samples={len(records)} labels={counts['total']}")
+    print(f"model={args.model} revision={args.model_revision}")
     print(f"class_counts={counts}")
     print(f"class_weights={weights}")
 
     device = torch.device("cuda", 0)
     torch.cuda.set_device(device)
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, revision=args.model_revision)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
-    base = Qwen2ForCausalLM.from_pretrained(args.model, dtype=torch.float16).to(device)
+    base = Qwen2ForCausalLM.from_pretrained(
+        args.model, revision=args.model_revision, dtype=torch.float16
+    ).to(device)
     model = TeacherForcedRouterQwen(base).to(device)
     model.routers.to(device=device, dtype=torch.float32)
     _require(len(model.routers) == NUM_LAYERS, f"expected {NUM_LAYERS} routers")
